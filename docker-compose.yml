@@ -1,0 +1,189 @@
+version: '3.8'
+
+services:
+  # ========== OBSERVABILITY ==========
+  postgres:
+    image: postgres:15
+    container_name: signoz-postgres
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: signoz
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - microservices
+
+  clickhouse-keeper:
+    image: clickhouse/clickhouse-keeper:25.12.5
+    container_name: clickhouse-keeper
+    entrypoint:
+      - /usr/bin/clickhouse-keeper
+      - --config-file=/etc/clickhouse-keeper/keeper.yaml
+    healthcheck:
+      test: ["CMD", "clickhouse-keeper-client", "-h", "localhost", "-p", "9181", "-q", "ls"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - clickhouse_keeper_data:/var/lib/clickhouse-keeper
+      - ./signoz-config/clickhouse-keeper/keeper.yaml:/etc/clickhouse-keeper/keeper.yaml:ro
+    networks:
+      - microservices
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12.5
+    container_name: clickhouse
+    depends_on:
+      clickhouse-keeper:
+        condition: service_healthy
+    environment:
+      - CLICKHOUSE_SKIP_USER_SETUP=1
+      - CLICKHOUSE_CONFIG=/etc/clickhouse-server/config.yaml
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./signoz-config/clickhouse/config.yaml:/etc/clickhouse-server/config.yaml:ro
+    networks:
+      - microservices
+
+  clickhouse-migrator:
+    image: signoz/signoz-otel-collector:latest
+    container_name: clickhouse-migrator
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate ready &&
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    restart: on-failure
+    networks:
+      - microservices
+
+  otel-collector:
+    image: signoz/signoz-otel-collector:latest
+    container_name: otel-collector
+    depends_on:
+      clickhouse-migrator:
+        condition: service_completed_successfully
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector --config=/etc/otel-collector-config.yaml
+    environment:
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_OTEL_COLLECTOR_TIMEOUT=10m
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    volumes:
+      - ./signoz-config/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    networks:
+      - microservices
+
+  signoz:
+    image: signoz/signoz:latest
+    container_name: signoz
+    depends_on:
+      clickhouse-migrator:
+        condition: service_completed_successfully
+    environment:
+      - SIGNOZ_TELEMETRYSTORE_PROVIDER=clickhouse
+      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
+    ports:
+      - "3301:8080"  # UI + API
+    volumes:
+      - signoz_data:/var/lib/signoz
+    networks:
+      - microservices
+
+  # ========== API GATEWAY ==========
+  nginx:
+    image: nginx:latest
+    container_name: api-gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - products-service
+      - orders-service
+      - users-service
+    networks:
+      - microservices
+
+  # ========== MICROSERVICES ==========
+  products-service:
+    build: ./products-service
+    container_name: products-service
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - SERVICE_NAME=products-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    ports:
+      - "3001:3001"
+    depends_on:
+      - otel-collector
+    networks:
+      - microservices
+
+  orders-service:
+    build: ./orders-service
+    container_name: orders-service
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+      - SERVICE_NAME=orders-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - PRODUCTS_SERVICE_URL=http://products-service:3001
+    ports:
+      - "3002:3002"
+    depends_on:
+      - otel-collector
+      - products-service
+    networks:
+      - microservices
+
+  users-service:
+    build: ./users-service
+    container_name: users-service
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+      - SERVICE_NAME=users-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    ports:
+      - "3003:3003"
+    depends_on:
+      - otel-collector
+    networks:
+      - microservices
+
+networks:
+  microservices:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  signoz_data:
+  clickhouse_data:
+  clickhouse_keeper_data:

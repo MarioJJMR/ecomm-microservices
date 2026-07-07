@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ecomm Microservices</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Ecomm Microservices</h1>
+    <div class="header-actions">
+      <span id="status-dot" class="status-dot" title="Gateway status"></span>
+      <button id="refresh-btn">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="new-order-panel">
+      <h2>New Order</h2>
+      <form id="order-form">
+        <label>
+          User
+          <select id="order-user" required></select>
+        </label>
+
+        <div id="order-items"></div>
+        <button type="button" id="add-item-btn">+ Add item</button>
+
+        <button type="submit">Place Order</button>
+        <p id="order-feedback" class="feedback"></p>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>Products</h2>
+      <table id="products-table">
+        <thead><tr><th>ID</th><th>Name</th><th>Price</th><th>Stock</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Users</h2>
+      <table id="users-table">
+        <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Joined</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Orders</h2>
+      <table id="orders-table">
+        <thead><tr><th>ID</th><th>User</th><th>Items</th><th>Total</th><th>Status</th><th>Created</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
