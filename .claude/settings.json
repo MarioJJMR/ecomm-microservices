@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sS -o /dev/null -w \"OTLP-HTTP root: %{http_code}\\\\n\" http://localhost:4318/v1/traces -X POST -H \"Content-Type: application/json\" -d '{}')",
+      "Bash(curl -sS -w '\\\\nHTTP:%{http_code}\\\\n' -X POST http://localhost/api/orders -H 'Content-Type: application/json' -d '{\"userId\":2,\"items\":[{\"productId\":3,\"quantity\":1}]}')",
+      "Bash(curl -sS -w \"\\\\nHTTP:%{http_code}\\\\n\" http://localhost/ -o /tmp/index.html)",
+      "Read(//tmp/**)",
+      "Bash(curl -sS -w \"\\\\nHTTP:%{http_code}\\\\n\" -o /dev/null http://localhost/app.js)",
+      "Bash(curl -sS -w \"\\\\nHTTP:%{http_code}\\\\n\" -o /dev/null http://localhost/style.css)",
+      "Bash(curl -sS -w \"\\\\nHTTP:%{http_code}\\\\n\" -o /dev/null http://localhost/api/products)",
+      "Bash(npx --version)",
+      "Bash(node --check \"c:\\\\Users\\\\mjj9\\\\OneDrive\\\\Documentos\\\\GitHub\\\\ecomm-microservices\\\\frontend\\\\app.js\")"
+    ]
+  }
+}
