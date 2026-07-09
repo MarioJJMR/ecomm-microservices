@@ -13,8 +13,25 @@ async function api(path, options) {
   return body?.data;
 }
 
-function money(cents) {
-  return `$${Number(cents).toFixed(2)}`;
+function money(amount) {
+  return amount === null || amount === undefined ? '—' : `$${Number(amount).toFixed(2)}`;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Order creation is async now (orders-service hands stock reservation off
+// to products-service over a queue) — POST /api/orders returns immediately
+// with status "pending", so poll until products-service's result lands.
+async function pollOrder(orderId, { intervalMs = 600, timeoutMs = 15000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const order = await api(`/api/orders/${orderId}`);
+    if (order.status !== 'pending') return order;
+    await sleep(intervalMs);
+  }
+  throw new Error('Timed out waiting for order confirmation.');
 }
 
 function renderProducts() {
@@ -41,7 +58,8 @@ function renderOrders() {
     .map(o => {
       const items = o.items.map(i => `${productName(i.productId)} ×${i.quantity}`).join(', ');
       const created = o.createdAt ? new Date(o.createdAt).toLocaleString() : '';
-      return `<tr><td>${o.id}</td><td>${userName(o.userId)}</td><td>${items}</td><td>${money(o.totalPrice)}</td><td>${o.status}</td><td>${created}</td></tr>`;
+      const status = `<span class="status-pill ${o.status}">${o.status}${o.reason ? ` · ${o.reason}` : ''}</span>`;
+      return `<tr><td>${o.id}</td><td>${userName(o.userId)}</td><td>${items}</td><td>${money(o.totalPrice)}</td><td>${status}</td><td>${created}</td></tr>`;
     })
     .join('') || '<tr><td colspan="6">No orders yet</td></tr>';
 }
@@ -116,20 +134,35 @@ async function submitOrder(event) {
     return;
   }
 
+  const submitBtn = event.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+
   try {
-    const order = await api('/api/orders', {
+    const pending = await api('/api/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, items }),
     });
-    feedback.textContent = `Order #${order.id} placed — total ${money(order.totalPrice)}.`;
-    feedback.className = 'feedback success';
-    document.getElementById('order-items').innerHTML = '';
-    addItemRow();
+    feedback.textContent = `Order #${pending.id} pending — reserving stock…`;
+    feedback.className = 'feedback';
+    await loadAll();
+
+    const order = await pollOrder(pending.id);
+    if (order.status === 'confirmed') {
+      feedback.textContent = `Order #${order.id} confirmed — total ${money(order.totalPrice)}.`;
+      feedback.className = 'feedback success';
+      document.getElementById('order-items').innerHTML = '';
+      addItemRow();
+    } else {
+      feedback.textContent = `Order #${order.id} rejected — ${order.reason ?? 'insufficient stock'}.`;
+      feedback.className = 'feedback error';
+    }
     await loadAll();
   } catch (err) {
     feedback.textContent = err.message;
     feedback.className = 'feedback error';
+  } finally {
+    submitBtn.disabled = false;
   }
 }
 

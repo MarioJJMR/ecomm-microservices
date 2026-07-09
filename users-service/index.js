@@ -21,53 +21,33 @@ console.log("✅ OpenTelemetry SDK initialized for Users Service");
 
 // ========== EXPRESS APP ==========
 const express = require("express");
+const { pool, migrate, toUser } = require("./db");
 const app = express();
 const PORT = process.env.PORT || 3003;
 
 // Middleware
 app.use(express.json());
 
-// Mock users database
-const users = [
-  {
-    id: 1,
-    name: "Alice Johnson",
-    email: "alice@example.com",
-    joinedAt: "2024-01-15",
-  },
-  {
-    id: 2,
-    name: "Bob Smith",
-    email: "bob@example.com",
-    joinedAt: "2024-02-20",
-  },
-  {
-    id: 3,
-    name: "Charlie Brown",
-    email: "charlie@example.com",
-    joinedAt: "2024-03-10",
-  },
-];
-
 // ========== ROUTES ==========
 
 // Get all users
-app.get("/api/users", (req, res) => {
+app.get("/api/users", async (req, res) => {
   console.log("👥 Fetching all users");
+  const { rows } = await pool.query("SELECT * FROM users ORDER BY id");
   res.json({
     status: "success",
-    data: users,
+    data: rows.map(toUser),
   });
 });
 
 // Get single user
-app.get("/api/users/:id", (req, res) => {
+app.get("/api/users/:id", async (req, res) => {
   const { id } = req.params;
   console.log(`👥 Fetching user ${id}`);
 
-  const user = users.find((u) => u.id === parseInt(id));
+  const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
 
-  if (!user) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "User not found",
@@ -76,12 +56,12 @@ app.get("/api/users/:id", (req, res) => {
 
   res.json({
     status: "success",
-    data: user,
+    data: toUser(rows[0]),
   });
 });
 
 // Create user
-app.post("/api/users", (req, res) => {
+app.post("/api/users", async (req, res) => {
   const { name, email } = req.body;
   console.log(`👥 Creating user: ${name}`);
 
@@ -92,65 +72,69 @@ app.post("/api/users", (req, res) => {
     });
   }
 
-  const newUser = {
-    id: users.length + 1,
-    name,
-    email,
-    joinedAt: new Date().toISOString().split("T")[0],
-  };
+  try {
+    const { rows } = await pool.query(
+      "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING *",
+      [name, email]
+    );
 
-  users.push(newUser);
-
-  res.status(201).json({
-    status: "success",
-    data: newUser,
-  });
+    res.status(201).json({
+      status: "success",
+      data: toUser(rows[0]),
+    });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(400).json({
+        status: "error",
+        message: "Email already exists",
+      });
+    }
+    throw error;
+  }
 });
 
 // Update user
-app.put("/api/users/:id", (req, res) => {
+app.put("/api/users/:id", async (req, res) => {
   const { id } = req.params;
   const { name, email } = req.body;
   console.log(`👥 Updating user ${id}`);
 
-  const user = users.find((u) => u.id === parseInt(id));
+  const { rows } = await pool.query(
+    "UPDATE users SET name = COALESCE($1, name), email = COALESCE($2, email) WHERE id = $3 RETURNING *",
+    [name || null, email || null, id]
+  );
 
-  if (!user) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "User not found",
     });
   }
 
-  if (name) user.name = name;
-  if (email) user.email = email;
-
   res.json({
     status: "success",
-    data: user,
+    data: toUser(rows[0]),
   });
 });
 
 // Delete user
-app.delete("/api/users/:id", (req, res) => {
+app.delete("/api/users/:id", async (req, res) => {
   const { id } = req.params;
   console.log(`👥 Deleting user ${id}`);
 
-  const index = users.findIndex((u) => u.id === parseInt(id));
+  const { rows } = await pool.query("DELETE FROM users WHERE id = $1 RETURNING *", [id]);
 
-  if (index === -1) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "User not found",
     });
   }
 
-  const deletedUser = users.splice(index, 1);
-
   res.json({
     status: "success",
     message: "User deleted",
-    data: deletedUser[0],
+    data: toUser(rows[0]),
   });
 });
 
@@ -160,10 +144,17 @@ app.get("/health", (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Users Service running on port ${PORT}`);
-  console.log(`📊 Traces being sent to: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}`);
-});
+migrate()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`🚀 Users Service running on port ${PORT}`);
+      console.log(`📊 Traces being sent to: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}`);
+    });
+  })
+  .catch((error) => {
+    console.error("❌ Failed to run database migration:", error.message);
+    process.exit(1);
+  });
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
