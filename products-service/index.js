@@ -21,40 +21,35 @@ console.log("✅ OpenTelemetry SDK initialized for Products Service");
 
 // ========== EXPRESS APP ==========
 const express = require("express");
+const { pool, migrate, toProduct, reserveStock } = require("./db");
+const queue = require("./queue");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(express.json());
 
-// Mock product database
-const products = [
-  { id: 1, name: "Laptop", price: 999, stock: 5 },
-  { id: 2, name: "Mouse", price: 25, stock: 50 },
-  { id: 3, name: "Keyboard", price: 75, stock: 30 },
-  { id: 4, name: "Monitor", price: 299, stock: 10 },
-];
-
 // ========== ROUTES ==========
 
 // Get all products
-app.get("/api/products", (req, res) => {
+app.get("/api/products", async (req, res) => {
   console.log("📦 Fetching all products");
+  const { rows } = await pool.query("SELECT * FROM products ORDER BY id");
   res.json({
     status: "success",
-    data: products,
+    data: rows.map(toProduct),
     timestamp: new Date().toISOString(),
   });
 });
 
 // Get single product
-app.get("/api/products/:id", (req, res) => {
+app.get("/api/products/:id", async (req, res) => {
   const { id } = req.params;
   console.log(`📦 Fetching product ${id}`);
 
-  const product = products.find((p) => p.id === parseInt(id));
+  const { rows } = await pool.query("SELECT * FROM products WHERE id = $1", [id]);
 
-  if (!product) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "Product not found",
@@ -63,78 +58,75 @@ app.get("/api/products/:id", (req, res) => {
 
   res.json({
     status: "success",
-    data: product,
+    data: toProduct(rows[0]),
   });
 });
 
 // Create product
-app.post("/api/products", (req, res) => {
+app.post("/api/products", async (req, res) => {
   const { name, price, stock } = req.body;
   console.log(`📦 Creating new product: ${name}`);
 
-  const newProduct = {
-    id: products.length + 1,
-    name,
-    price,
-    stock,
-  };
-
-  products.push(newProduct);
+  const { rows } = await pool.query(
+    "INSERT INTO products (name, price, stock) VALUES ($1, $2, $3) RETURNING *",
+    [name, price, stock]
+  );
 
   res.status(201).json({
     status: "success",
-    data: newProduct,
+    data: toProduct(rows[0]),
   });
 });
 
 // Check stock
-app.post("/api/products/check-stock", (req, res) => {
+app.post("/api/products/check-stock", async (req, res) => {
   const { productId, quantity } = req.body;
   console.log(`📦 Checking stock for product ${productId}`);
 
-  const product = products.find((p) => p.id === productId);
+  const { rows } = await pool.query("SELECT stock FROM products WHERE id = $1", [productId]);
 
-  if (!product) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "Product not found",
     });
   }
 
-  const hasStock = product.stock >= quantity;
+  const hasStock = rows[0].stock >= quantity;
 
   res.json({
     status: "success",
     data: {
       productId,
       available: hasStock,
-      quantity: product.stock,
+      quantity: rows[0].stock,
     },
   });
 });
 
 // Update product stock
-app.put("/api/products/:id/stock", (req, res) => {
+app.put("/api/products/:id/stock", async (req, res) => {
   const { id } = req.params;
   const { quantity } = req.body;
   console.log(`📦 Updating stock for product ${id}`);
 
-  const product = products.find((p) => p.id === parseInt(id));
+  const { rows } = await pool.query(
+    "UPDATE products SET stock = stock - $1 WHERE id = $2 RETURNING stock",
+    [quantity, id]
+  );
 
-  if (!product) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "Product not found",
     });
   }
 
-  product.stock -= quantity;
-
   res.json({
     status: "success",
     data: {
       message: "Stock updated",
-      newStock: product.stock,
+      newStock: rows[0].stock,
     },
   });
 });
@@ -144,10 +136,35 @@ app.get("/health", (req, res) => {
   res.json({ status: "healthy", service: "products-service" });
 });
 
+// ========== QUEUE CONSUMER ==========
+// Reserves stock for an entire order in one transaction (see db.js) instead
+// of the check-stock/PUT-stock REST calls above, which orders-service no
+// longer uses for order creation.
+async function handleStockRequest({ orderId, items }) {
+  console.log(`📦 Reserving stock for order ${orderId}`);
+  const result = await reserveStock(orderId, items);
+  queue.publishResult({ orderId, ...result });
+  console.log(
+    result.ok
+      ? `✅ Reserved stock for order ${orderId}`
+      : `⛔ Rejected order ${orderId}: ${result.reason}`
+  );
+}
+
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Products Service running on port ${PORT}`);
-  console.log(`📊 Traces being sent to: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}`);
+async function start() {
+  await migrate();
+  await queue.connect();
+  queue.consumeRequests(handleStockRequest);
+  app.listen(PORT, () => {
+    console.log(`🚀 Products Service running on port ${PORT}`);
+    console.log(`📊 Traces being sent to: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}`);
+  });
+}
+
+start().catch((error) => {
+  console.error("❌ Failed to start products-service:", error.message);
+  process.exit(1);
 });
 
 // Graceful shutdown

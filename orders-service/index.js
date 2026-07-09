@@ -21,114 +21,65 @@ console.log("✅ OpenTelemetry SDK initialized for Orders Service");
 
 // ========== EXPRESS APP ==========
 const express = require("express");
-const axios = require("axios");
+const { pool, migrate, toOrder } = require("./db");
+const queue = require("./queue");
 const app = express();
 const PORT = process.env.PORT || 3002;
-
-const PRODUCTS_SERVICE_URL = process.env.PRODUCTS_SERVICE_URL || "http://localhost:3001";
 
 // Middleware
 app.use(express.json());
 
-// Mock orders database
-const orders = [];
-
 // ========== ROUTES ==========
 
-// Create order (calls products service)
+// Create order — inserts a pending row, then hands the actual stock
+// reservation off to products-service over the queue. The reservation runs
+// as one all-or-nothing transaction over there (see products-service/db.js),
+// so a shortage on one line item can no longer leave an earlier item's
+// stock decremented with nothing to show for it.
 app.post("/api/orders", async (req, res) => {
   const { userId, items } = req.body;
   console.log(`📋 Creating order for user ${userId}`);
 
-  try {
-    // Simulate calling products service to validate and update stock
-    let totalPrice = 0;
-
-    for (const item of items) {
-      try {
-        console.log(`   Checking product ${item.productId}...`);
-        
-        // Check stock
-        const stockResponse = await axios.post(
-          `${PRODUCTS_SERVICE_URL}/api/products/check-stock`,
-          {
-            productId: item.productId,
-            quantity: item.quantity,
-          }
-        );
-
-        if (!stockResponse.data.data.available) {
-          return res.status(400).json({
-            status: "error",
-            message: `Insufficient stock for product ${item.productId}`,
-          });
-        }
-
-        // Get product details
-        const productResponse = await axios.get(
-          `${PRODUCTS_SERVICE_URL}/api/products/${item.productId}`
-        );
-
-        totalPrice += productResponse.data.data.price * item.quantity;
-
-        // Update stock
-        await axios.put(
-          `${PRODUCTS_SERVICE_URL}/api/products/${item.productId}/stock`,
-          { quantity: item.quantity }
-        );
-      } catch (error) {
-        console.error(`   Error processing product ${item.productId}:`, error.message);
-        return res.status(500).json({
-          status: "error",
-          message: `Error communicating with products service: ${error.message}`,
-        });
-      }
-    }
-
-    // Create order
-    const newOrder = {
-      id: orders.length + 1,
-      userId,
-      items,
-      totalPrice,
-      status: "confirmed",
-      createdAt: new Date().toISOString(),
-    };
-
-    orders.push(newOrder);
-
-    console.log(`✅ Order ${newOrder.id} created successfully`);
-
-    res.status(201).json({
-      status: "success",
-      data: newOrder,
-    });
-  } catch (error) {
-    console.error("❌ Error creating order:", error.message);
-    res.status(500).json({
+  if (!userId || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({
       status: "error",
-      message: error.message,
+      message: "userId and a non-empty items array are required",
     });
   }
+
+  const { rows } = await pool.query(
+    "INSERT INTO orders (user_id, items, status) VALUES ($1, $2, 'pending') RETURNING *",
+    [userId, JSON.stringify(items)]
+  );
+  const order = toOrder(rows[0]);
+
+  queue.publishRequest({ orderId: order.id, items });
+  console.log(`📤 Order ${order.id} pending — stock reservation requested`);
+
+  res.status(202).json({
+    status: "success",
+    data: order,
+  });
 });
 
 // Get all orders
-app.get("/api/orders", (req, res) => {
+app.get("/api/orders", async (req, res) => {
   console.log("📋 Fetching all orders");
+  const { rows } = await pool.query("SELECT * FROM orders ORDER BY id");
   res.json({
     status: "success",
-    data: orders,
+    data: rows.map(toOrder),
   });
 });
 
 // Get single order
-app.get("/api/orders/:id", (req, res) => {
+app.get("/api/orders/:id", async (req, res) => {
   const { id } = req.params;
   console.log(`📋 Fetching order ${id}`);
 
-  const order = orders.find((o) => o.id === parseInt(id));
+  const { rows } = await pool.query("SELECT * FROM orders WHERE id = $1", [id]);
 
-  if (!order) {
+  if (rows.length === 0) {
     return res.status(404).json({
       status: "error",
       message: "Order not found",
@@ -137,20 +88,20 @@ app.get("/api/orders/:id", (req, res) => {
 
   res.json({
     status: "success",
-    data: order,
+    data: toOrder(rows[0]),
   });
 });
 
 // Get user orders
-app.get("/api/orders/user/:userId", (req, res) => {
+app.get("/api/orders/user/:userId", async (req, res) => {
   const { userId } = req.params;
   console.log(`📋 Fetching orders for user ${userId}`);
 
-  const userOrders = orders.filter((o) => o.userId === parseInt(userId));
+  const { rows } = await pool.query("SELECT * FROM orders WHERE user_id = $1 ORDER BY id", [userId]);
 
   res.json({
     status: "success",
-    data: userOrders,
+    data: rows.map(toOrder),
   });
 });
 
@@ -159,11 +110,39 @@ app.get("/health", (req, res) => {
   res.json({ status: "healthy", service: "orders-service" });
 });
 
+// ========== QUEUE CONSUMER ==========
+// Only updates a row that's still 'pending', so a redelivered message (e.g.
+// after a crash right before the ack) is a harmless no-op the second time.
+async function handleStockResult({ orderId, ok, items, totalPrice, reason }) {
+  if (ok) {
+    await pool.query(
+      "UPDATE orders SET status = 'confirmed', items = $1, total_price = $2 WHERE id = $3 AND status = 'pending'",
+      [JSON.stringify(items), totalPrice, orderId]
+    );
+    console.log(`✅ Order ${orderId} confirmed`);
+  } else {
+    await pool.query(
+      "UPDATE orders SET status = 'rejected', reason = $1 WHERE id = $2 AND status = 'pending'",
+      [reason, orderId]
+    );
+    console.log(`❌ Order ${orderId} rejected: ${reason}`);
+  }
+}
+
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Orders Service running on port ${PORT}`);
-  console.log(`📊 Traces being sent to: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}`);
-  console.log(`🔗 Products Service URL: ${PRODUCTS_SERVICE_URL}`);
+async function start() {
+  await migrate();
+  await queue.connect();
+  queue.consumeResults(handleStockResult);
+  app.listen(PORT, () => {
+    console.log(`🚀 Orders Service running on port ${PORT}`);
+    console.log(`📊 Traces being sent to: ${process.env.OTEL_EXPORTER_OTLP_ENDPOINT}`);
+  });
+}
+
+start().catch((error) => {
+  console.error("❌ Failed to start orders-service:", error.message);
+  process.exit(1);
 });
 
 // Graceful shutdown

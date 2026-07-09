@@ -1,20 +1,50 @@
 version: '3.8'
 
 services:
-  # ========== OBSERVABILITY ==========
+  # ========== DATABASE ==========
   postgres:
-    image: postgres:15
-    container_name: signoz-postgres
+    image: postgres:16-alpine
+    container_name: postgres
     environment:
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: signoz
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     networks:
       - microservices
 
+  # ========== MESSAGE QUEUE ==========
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI
+    networks:
+      - microservices
+
+  # ========== OBSERVABILITY ==========
   clickhouse-keeper:
     image: clickhouse/clickhouse-keeper:25.12.5
     container_name: clickhouse-keeper
@@ -139,10 +169,17 @@ services:
       - PORT=3001
       - SERVICE_NAME=products-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/products
+      - AMQP_URL=amqp://guest:guest@rabbitmq:5672
     ports:
       - "3001:3001"
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
       - microservices
 
@@ -154,12 +191,17 @@ services:
       - PORT=3002
       - SERVICE_NAME=orders-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - PRODUCTS_SERVICE_URL=http://products-service:3001
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/orders
+      - AMQP_URL=amqp://guest:guest@rabbitmq:5672
     ports:
       - "3002:3002"
     depends_on:
-      - otel-collector
-      - products-service
+      otel-collector:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     networks:
       - microservices
 
@@ -171,10 +213,14 @@ services:
       - PORT=3003
       - SERVICE_NAME=users-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/users
     ports:
       - "3003:3003"
     depends_on:
-      - otel-collector
+      otel-collector:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks:
       - microservices
 
@@ -187,3 +233,4 @@ volumes:
   signoz_data:
   clickhouse_data:
   clickhouse_keeper_data:
+  rabbitmq_data:
