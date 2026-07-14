@@ -87,6 +87,11 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  rabbitmq:
+    endpoint: http://rabbitmq:15672
+    username: guest
+    password: guest
+    collection_interval: 15s
 service:
   extensions:
   - signoz_health_check
@@ -110,6 +115,7 @@ service:
       - batch
       receivers:
       - otlp
+      - rabbitmq
     metrics/meter:
       exporters:
       - signozclickhousemeter

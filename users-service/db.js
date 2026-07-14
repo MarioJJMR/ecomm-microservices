@@ -1,6 +1,18 @@
 const { Pool } = require("pg");
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+
+// pg emits 'error' on idle clients that lose their connection in the
+// background (e.g. Postgres restart) — without a listener this throws and
+// kills the process, since Pool is a plain EventEmitter.
+pool.on("error", (error) => {
+  console.error("⚠️  Unexpected Postgres pool error:", error.message);
+});
 
 async function migrate() {
   await pool.query(`

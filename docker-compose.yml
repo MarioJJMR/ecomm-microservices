@@ -163,7 +163,6 @@ services:
   # ========== MICROSERVICES ==========
   products-service:
     build: ./products-service
-    container_name: products-service
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -171,8 +170,6 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/products
       - AMQP_URL=amqp://guest:guest@rabbitmq:5672
-    ports:
-      - "3001:3001"
     depends_on:
       otel-collector:
         condition: service_started

@@ -159,7 +159,7 @@ migrate()
 // Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("Shutting down gracefully...");
-  sdk.shutdown().then(() => {
+  Promise.all([sdk.shutdown(), pool.end()]).then(() => {
     process.exit(0);
   });
 });
